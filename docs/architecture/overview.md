@@ -9,7 +9,8 @@ Smriti is a desktop app split across three crates / workspaces:
     database lives at `<drive>/.photovault/photovault.db` (kept under
     that name for backwards compatibility with libraries indexed
     before the rename).
-  - `src/ml/` — ONNX Runtime wrapper, face detector, embedder.
+  - `src/ml/` — ONNX Runtime wrapper (`ManagedSession`: GPU first, CPU
+    fallback), face detector, embedder, remote GPU bridge client.
   - `src/config/`, `src/models/`, `src/search/` — config,
     domain types and query parsing.
   - `src/bootstrap.rs` — runtime asset checks (ONNX runtime, models,

@@ -59,6 +59,15 @@ against image meaning, and Photo Detail can show visually similar photos.
 
 See the [People and Faces](people.md) guide for the full pipeline.
 
+## AI and GPU
+
+- **Use the GPU for on-device AI (faces, visual search)** — on by
+  default. Face detection, face embedding and visual-search indexing
+  use a usable GPU and fall back to the CPU if there is none or it
+  fails. Turn it off if the GPU is slower than your CPU (some
+  integrated GPUs). Applies to the next run. Search queries always run
+  on the CPU. See [GPU acceleration](../gpu-inference.md).
+
 ## Burst detection
 
 - **Burst window** — time window (in seconds) used to group burst

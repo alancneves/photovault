@@ -40,7 +40,8 @@ captures identity:
 Embeddings from different models are not interchangeable. Smriti
 refuses to mix them in the same library.
 
-Embedding is the compute-heavy step. The optional [GPU bridge](../face-gpu-bridge.md)
+Embedding is the compute-heavy step. A usable local GPU is used automatically
+(with CPU fallback), and the optional [GPU bridge](../gpu-inference.md)
 offloads this to a free Kaggle/Colab notebook for a 10–70× speedup
 on the one-time pass.
 
@@ -91,7 +92,7 @@ over- or under-clustering after running a full pass.
 ## Privacy
 
 - Models run locally by default. Nothing leaves your machine unless
-  you explicitly enable the [GPU bridge](../face-gpu-bridge.md).
+  you explicitly enable the [GPU bridge](../gpu-inference.md).
 - When the bridge is enabled, only the 112×112 aligned face crop is
   sent — never the original photo, EXIF, or filename.
 - Embeddings and detection metadata are stored only in your
@@ -100,6 +101,8 @@ over- or under-clustering after running a full pass.
 ## Code map
 
 - `src/ml/` — ONNX runtime wrapper, model loaders, inference glue.
+  Models are loaded through `ManagedSession` (GPU first, CPU fallback);
+  see [GPU acceleration](../gpu-inference.md).
 - `src/services/face_processor.rs` — orchestration (detection →
   embedding → clustering).
 - `src/services/face_processor/` — submodules per stage.
@@ -107,8 +110,8 @@ over- or under-clustering after running a full pass.
 
 ## See also
 
-- [Face GPU Bridge](../face-gpu-bridge.md) — opt-in remote
-  acceleration.
+- [GPU acceleration](../gpu-inference.md) — local GPU with CPU
+  fallback for the on-device models, plus the opt-in remote GPU bridge.
 - [People and Faces user guide](../user-guide/people.md) — user-
   facing perspective.
   — historical notes on tuning decisions.

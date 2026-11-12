@@ -37,8 +37,8 @@ with your OS, Smriti version, and the symptom.
    progress reads "0 / N faces" while it's working its way through.
    Don't close the app — close-and-resume works but the pass starts
    over for the current photo. See
-   [the GPU bridge doc](../face-gpu-bridge.md) for a 10–70× speedup
-   via free Kaggle/Colab.
+   [GPU acceleration](../gpu-inference.md) for using your own GPU, or
+   a 10–70× speedup via free Kaggle/Colab.
 2. **A single huge file is hanging the decoder.** If progress
    restarts on a specific file every time, that file may be corrupt
    or unsupported. Move it out of the library and rescan.

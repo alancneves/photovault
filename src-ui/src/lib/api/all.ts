@@ -545,6 +545,7 @@ export interface Settings {
   thumbnail_cache_gb: number;
   face_gpu_bridge_url: string | null;
   face_gpu_bridge_enabled: boolean;
+  gpu_inference: boolean;
   face_embedder_model: string;
   assistant_enabled: boolean;
   ai_features_enabled: boolean;

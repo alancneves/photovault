@@ -77,9 +77,9 @@ From **Settings → Maintenance**:
 
 - **First scan** of a 10,000-photo library on a modern laptop:
   5–15 minutes for metadata, then 30 minutes – 3 hours for face
-  detection on CPU (the slow step). A free Kaggle/Colab GPU bridge
-  can cut the face pass to ~5 minutes — see
-  [the face GPU bridge doc](../face-gpu-bridge.md).
+  detection on CPU (the slow step). A usable local GPU is used
+  automatically, and a free Kaggle/Colab GPU bridge can cut the face pass
+  to ~5 minutes — see [GPU acceleration](../gpu-inference.md).
 - **Checking for changes** on an unchanged library: one folder walk —
   seconds on an SSD, about a minute for very large libraries on a USB
   hard drive.

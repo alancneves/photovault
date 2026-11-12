@@ -5,6 +5,7 @@
 //! offloading to a remote GPU bridge.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use image::RgbImage;
 use ndarray::Array1;
@@ -12,7 +13,8 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 use super::remote_embedder::RemoteEmbedder;
-use super::OnnxRuntime;
+use super::runtime::ManagedSession;
+use super::{OnnxRuntime, SharedGpuSession};
 
 /// 512-dimensional face embedding
 #[derive(Debug, Clone)]
@@ -81,6 +83,9 @@ pub struct EmbedderConfig {
     /// clustering.
     pub expected_model: String,
     pub intra_threads: usize,
+    /// Accelerated session shared by all workers of a run. When set, local
+    /// embedding runs on it instead of a per-worker CPU session.
+    pub shared_gpu: Option<Arc<SharedGpuSession>>,
 }
 
 /// Dispatch enum — either local ONNX or remote GPU bridge.
@@ -105,15 +110,24 @@ impl FaceEmbedder {
     /// passes its initial health check (including model match), the
     /// returned embedder routes batches through the remote first.
     pub fn from_config(rt: &OnnxRuntime, cfg: &EmbedderConfig) -> Result<Self, ort::Error> {
+        // Local embedder: the shared GPU session when there is one, else this
+        // worker's own CPU session.
+        let make_local = || -> Result<LocalEmbedder, ort::Error> {
+            match &cfg.shared_gpu {
+                Some(gpu) => Ok(LocalEmbedder::new_shared(
+                    gpu.clone(),
+                    &cfg.model_path,
+                    cfg.intra_threads,
+                )),
+                None => LocalEmbedder::new_with_threads(rt, &cfg.model_path, cfg.intra_threads),
+            }
+        };
+
         if let Some(ref url) = cfg.gpu_bridge_url {
             let remote = RemoteEmbedder::new(url.clone(), cfg.expected_model.clone());
             if remote.is_healthy() {
                 let local_fallback = if cfg.model_path.exists() {
-                    Some(LocalEmbedder::new_with_threads(
-                        rt,
-                        &cfg.model_path,
-                        cfg.intra_threads,
-                    )?)
+                    Some(make_local()?)
                 } else {
                     tracing::warn!(
                         "Local face embedder model {} missing; using remote bridge without local fallback",
@@ -129,8 +143,7 @@ impl FaceEmbedder {
             }
             tracing::info!("Remote GPU bridge unavailable; using local embedder");
         }
-        let local = LocalEmbedder::new_with_threads(rt, &cfg.model_path, cfg.intra_threads)?;
-        Ok(FaceEmbedder::Local(local))
+        Ok(FaceEmbedder::Local(make_local()?))
     }
 
     /// Generate embedding for an aligned face image (112x112).
@@ -184,9 +197,7 @@ impl FaceEmbedder {
 
 /// Local ArcFace Face Embedder using ONNX Runtime.
 pub struct LocalEmbedder {
-    session: Option<Session>,
-    model_path: PathBuf,
-    cpu_fallback_attempted: bool,
+    session: ManagedSession,
 }
 
 impl LocalEmbedder {
@@ -196,15 +207,23 @@ impl LocalEmbedder {
         model_path: P,
         intra_threads: usize,
     ) -> ort::Result<Self> {
-        let model_path = model_path.as_ref().to_path_buf();
         let _ = runtime;
-        let session = OnnxRuntime::load_cpu_model_with_threads(&model_path, intra_threads)?;
+        let session = ManagedSession::cpu(model_path.as_ref(), intra_threads)?;
 
-        Ok(Self {
-            session: Some(session),
-            model_path,
-            cpu_fallback_attempted: false,
-        })
+        Ok(Self { session })
+    }
+
+    /// Use a session shared across workers (see [`SharedGpuSession`]). No
+    /// per-worker session is built; if the GPU fails, the first failing call
+    /// loads a CPU session for this embedder (`intra_threads`) and retries.
+    pub fn new_shared<P: AsRef<std::path::Path>>(
+        gpu: Arc<SharedGpuSession>,
+        model_path: P,
+        intra_threads: usize,
+    ) -> Self {
+        Self {
+            session: ManagedSession::shared(gpu, model_path.as_ref(), intra_threads),
+        }
     }
 
     /// Generate embedding for an aligned face image (112x112)
@@ -288,28 +307,15 @@ impl LocalEmbedder {
         input_data: &[f32],
         batch_size: i64,
     ) -> ort::Result<Vec<f32>> {
-        match self.run_inference_once(input_data, batch_size) {
-            Ok(output) => Ok(output),
-            Err(error) if !self.cpu_fallback_attempted => {
-                tracing::warn!(%error, "Embedding inference failed; retrying once on CPU");
-                self.cpu_fallback_attempted = true;
-                self.session = None;
-                self.session = Some(OnnxRuntime::load_cpu_model(&self.model_path)?);
-                self.run_inference_once(input_data, batch_size)
-            }
-            Err(error) => Err(error),
-        }
+        self.session
+            .run(|session| Self::infer(session, input_data, batch_size))
     }
 
-    fn run_inference_once(&mut self, input_data: &[f32], batch_size: i64) -> ort::Result<Vec<f32>> {
+    fn infer(session: &mut Session, input_data: &[f32], batch_size: i64) -> ort::Result<Vec<f32>> {
         let input_tensor =
             TensorRef::<f32>::from_array_view((vec![batch_size, 3, 112, 112], input_data))?;
 
-        let outputs = self
-            .session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("Embedder session unavailable"))?
-            .run(ort::inputs![input_tensor])?;
+        let outputs = session.run(ort::inputs![input_tensor])?;
 
         let (_name, output) = outputs
             .iter()

@@ -39,3 +39,6 @@ Thumbs.db
 
 # Coding-agent session scratch
 /.zcode/
+
+# Local docker-compose settings (PHOTOS_DIR etc.)
+/.env

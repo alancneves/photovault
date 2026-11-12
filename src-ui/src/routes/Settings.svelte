@@ -706,6 +706,15 @@
       <p class="hint blurb">
         Enables provider-backed Assistant features. Local visual search remains available when this is off.
       </p>
+      <label class="checkbox">
+        <input type="checkbox" checked={s.gpu_inference}
+          onchange={(e) => patch({ gpu_inference: (e.target as HTMLInputElement).checked })} />
+        <span class="label-text">Use the GPU for on-device AI (faces, visual search)</span>
+      </label>
+      <p class="hint blurb">
+        On by default. Smriti falls back to the CPU if no usable GPU is found or it fails.
+        Turn off if the GPU is slower than your CPU (some integrated GPUs). Applies to the next run.
+      </p>
     </section>
 
     {#if s.ai_features_enabled}
@@ -1237,7 +1246,7 @@
         Offload face embedding to a free GPU notebook you control.
         Sends only 112×112 face crops (not photos) to a URL you provide.
         Uses local CPU as a fallback only when the matching local embedding model is installed.
-        <a href="https://github.com/anomalyco/photovault/blob/main/docs/face-gpu-bridge.md" target="_blank" rel="noopener" class="inline-link">How to set up a free Kaggle / Colab notebook →</a>
+        <a href="https://github.com/anomalyco/photovault/blob/main/docs/gpu-inference.md#remote-gpu-bridge" target="_blank" rel="noopener" class="inline-link">How to set up a free Kaggle / Colab notebook →</a>
       </p>
       <label class="checkbox" style="margin-bottom: var(--s-3)">
         <input type="checkbox" checked={s.face_gpu_bridge_enabled}

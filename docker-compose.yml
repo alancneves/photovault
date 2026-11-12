@@ -1,0 +1,126 @@
+# Smriti — containerised build / test / run.
+#
+# Every service sits behind a profile, so a bare `docker compose up` does
+# nothing. Start one with `docker compose run --rm <service>`:
+#
+#   assets    One-time: download the face models, GeoNames data and a CPU ONNX
+#             Runtime into ./models ./data ./libs on the host.
+#   ci        Same checks as scripts/ci_local.sh ci (fmt, clippy, tests, frontend).
+#   dev       A shell in the toolchain image with the repo mounted at /workspace.
+#   app       Heavy image (CUDA + GPU ONNX Runtime): GPU first, CPU fallback.
+#   app-cpu   Light image (plain Ubuntu + CPU ONNX Runtime). No NVIDIA needed.
+#
+# Running the GUI needs an X11 display (Wayland desktops: XWayland is fine):
+#   xhost +local:docker          # once per login session
+#   PHOTOS_DIR=~/Pictures docker compose run --rm app
+# The photos folder appears inside the app at PHOTOS_MOUNT. Settings and any
+# downloaded packs live in Docker volumes unless you point SMRITI_*_DIR at host folders.
+#
+# GPU needs the NVIDIA driver and the NVIDIA Container Toolkit on the host.
+# Without a working GPU the app still starts and uses the CPU.
+#
+# Variables (all optional):
+#   PHOTOS_DIR      host folder with photos             (default ./photos)
+#   PHOTOS_MOUNT    where it appears inside the app     (default /photos)
+#                   Set it equal to PHOTOS_DIR to keep the same path in and out of Docker.
+#   SMRITI_CONFIG_DIR  host folder for settings   (default: a Docker volume)
+#   SMRITI_DATA_DIR    host folder for downloaded packs/models (default: a Docker volume)
+#                      Point these at ~/.config/smriti and ~/.local/share/smriti to share
+#                      settings and the downloaded packs with the Smriti installed on the host.
+#   Put these in a .env file next to this one (git-ignored) to make them permanent.
+#   CARGO_FEATURES  cargo features for the build        (default heic)
+#   UID / GID       owner of files written to the repo  (default 1000;
+#                   bash doesn't export UID, so use: UID=$(id -u) GID=$(id -g) docker compose ...)
+
+x-dev: &dev
+  build:
+    context: .
+    target: dev
+  image: smriti-dev
+  user: "${UID:-1000}:${GID:-1000}"
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+    # Rust build output, the cargo registry and the npm cache live in a volume,
+    # so the host's own target/ is untouched. (`ci` still runs `npm ci` in
+    # src-ui/, which reinstalls src-ui/node_modules on the host.)
+    - smriti-cache:/cache
+
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  user: "${UID:-1000}:${GID:-1000}"
+  environment:
+    DISPLAY: "${DISPLAY:-:0}"
+    RUST_LOG: "${RUST_LOG:-info}"
+    # WebKit's bubblewrap sandbox needs user namespaces Docker doesn't grant.
+    # The container is the sandbox; the app only loads its own bundled UI.
+    WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+  volumes:
+    - /tmp/.X11-unix:/tmp/.X11-unix
+    - smriti-state:/state
+    # Settings and downloaded packs. A bare name is a Docker volume (isolated
+    # from the host app); an absolute path shares that host folder instead.
+    - ${SMRITI_CONFIG_DIR:-smriti-config}:/state/config/smriti
+    - ${SMRITI_DATA_DIR:-smriti-data}:/state/data/smriti
+    - ${PHOTOS_DIR:-./photos}:${PHOTOS_MOUNT:-/photos}
+    # Face models and GeoNames from `docker compose run --rm assets`.
+    - ./models:/app/models:ro
+    - ./data:/app/data:ro
+  shm_size: "1gb"
+
+services:
+  assets:
+    <<: *dev
+    profiles: ["assets"]
+    command: scripts/setup_assets.sh
+
+  ci:
+    <<: *dev
+    profiles: ["ci"]
+    command: scripts/ci_local.sh ci
+
+  dev:
+    <<: *dev
+    profiles: ["dev"]
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # Heavy image: CUDA 12 + cuDNN 9 + GPU ONNX Runtime (build arg GPU=true).
+  app:
+    <<: *app
+    profiles: ["app"]
+    build:
+      context: .
+      target: runtime
+      args:
+        GPU: "true"
+        CARGO_FEATURES: "${CARGO_FEATURES:-heic}"
+    image: smriti-app:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Light image: plain Ubuntu + CPU ONNX Runtime (build arg GPU=false).
+  app-cpu:
+    <<: *app
+    profiles: ["app-cpu"]
+    build:
+      context: .
+      target: runtime
+      args:
+        GPU: "false"
+        CARGO_FEATURES: "${CARGO_FEATURES:-heic}"
+    image: smriti-app:cpu
+
+volumes:
+  smriti-cache:
+  smriti-state:
+  smriti-config:
+  smriti-data:

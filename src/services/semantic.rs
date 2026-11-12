@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 use crate::db::connection::library_metadata_dir;
-use crate::ml::OnnxRuntime;
+use crate::ml::{ManagedSession, OnnxRuntime};
 use crate::services::image_io;
 use crate::services::path_util::safe_join_relative;
 
@@ -661,13 +661,17 @@ struct IndexRow {
 }
 
 pub struct SemanticImageRunner {
-    visual: ort::session::Session,
+    visual: ManagedSession,
 }
 
 impl SemanticImageRunner {
+    /// GPU first (unless turned off in Settings), CPU if no GPU starts or it
+    /// fails mid-run. Indexing is a long batch job, so the one-off GPU session
+    /// set-up cost is repaid quickly.
     fn new(rt: &OnnxRuntime, paths: SemanticAssetPaths) -> Result<Self, String> {
-        let visual = rt
-            .load_model_with_threads(&paths.visual_model, 1)
+        let _ = rt;
+        let use_gpu = crate::config::AppConfig::load().gpu_inference;
+        let visual = ManagedSession::auto(&paths.visual_model, use_gpu, 1)
             .map_err(|e| format!("visual model load failed: {e}"))?;
         Ok(Self { visual })
     }
@@ -679,16 +683,23 @@ impl SemanticImageRunner {
 
     pub fn embed_image(&mut self, img: &DynamicImage) -> Result<Vec<f32>, String> {
         let tensor = preprocess_image(img);
-        let input = ort::value::TensorRef::<f32>::from_array_view((
-            vec![1, 3, 256, 256],
-            tensor.as_slice(),
-        ))
-        .map_err(|e| e.to_string())?;
-        let outputs = self
+        let raw = self
             .visual
-            .run(ort::inputs![input])
+            .run(|session| {
+                let input = ort::value::TensorRef::<f32>::from_array_view((
+                    vec![1, 3, 256, 256],
+                    tensor.as_slice(),
+                ))?;
+                let outputs = session.run(ort::inputs![input])?;
+                let (_name, output) = outputs
+                    .iter()
+                    .next()
+                    .ok_or_else(|| ort::Error::new("model produced no output tensor"))?;
+                let (_shape, data) = output.try_extract_tensor::<f32>()?;
+                Ok(data.to_vec())
+            })
             .map_err(|e| format!("visual inference failed: {e}"))?;
-        extract_normalized_output(outputs)
+        finish_embedding(raw)
     }
 }
 
@@ -763,7 +774,11 @@ fn extract_normalized_output(outputs: ort::session::SessionOutputs) -> Result<Ve
     let (_shape, data) = output
         .try_extract_tensor::<f32>()
         .map_err(|e| e.to_string())?;
-    let mut vector = data.to_vec();
+    finish_embedding(data.to_vec())
+}
+
+/// Check the dimension and L2-normalize a raw model output.
+fn finish_embedding(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {
     if vector.len() != SEMANTIC_DIM {
         return Err(format!(
             "unexpected semantic embedding dimension: expected {}, got {}",

@@ -103,6 +103,53 @@ cargo test -p smriti -p smriti-tauri
 (cd src-ui && npm run check && npm run build)
 ```
 
+## Docker
+
+`Dockerfile` and `docker-compose.yml` build, test and run Smriti without
+installing Rust, Node or the Tauri system libraries on the host. Linux only.
+
+```bash
+docker compose run --rm assets     # one-time: face models + GeoNames into ./models ./data
+docker compose run --rm ci         # fmt, clippy, tests and frontend checks (same as scripts/ci_local.sh ci)
+docker compose run --rm dev        # shell in the toolchain image, repo mounted at /workspace
+
+xhost +local:docker                # let the container open a window on your X11 display
+PHOTOS_DIR=~/Pictures docker compose run --rm app       # GPU first, CPU fallback
+PHOTOS_DIR=~/Pictures docker compose run --rm app-cpu   # no GPU request (no NVIDIA needed)
+```
+
+- Pass `UID=$(id -u) GID=$(id -g)` if your user is not 1000, so files written
+  to the repo are yours.
+- The image comes in two sizes, picked at build time with the `GPU` build arg:
+  - **heavy** (`GPU=true`, service `app`, image `smriti-app:gpu`): CUDA 12 +
+    cuDNN 9 base and the GPU build of ONNX Runtime 1.23. Needs the NVIDIA
+    driver and the NVIDIA Container Toolkit on the host. If the GPU can't be
+    used, face detection and embedding fall back to the CPU (see
+    `gpu_inference` in Settings).
+  - **light** (`GPU=false`, service `app-cpu`, image `smriti-app:cpu`): plain
+    Ubuntu base and the CPU build of ONNX Runtime. No NVIDIA needed, and the
+    image is several GB smaller.
+  - Without compose: `docker build --target runtime --build-arg GPU=false -t smriti-app:cpu .`
+- Photos: set `PHOTOS_DIR` to a host folder and open it in the app at
+  `PHOTOS_MOUNT` (default `/photos`). Set both to the same absolute path, for
+  example `/media/me/Drive/Photos`, to keep one path on the host and in the
+  container. Put them in a git-ignored `.env` next to `docker-compose.yml` to
+  make them permanent. The folder must be writable by your user, because Smriti
+  keeps its index in a `.photovault` folder inside the library. Don't open the
+  same library in the host app and the container at the same time.
+- Settings and downloaded packs (`~/.config/smriti`, `~/.local/share/smriti` on
+  the host) are kept in Docker volumes by default, separate from a Smriti
+  installed on the host. To share them instead, set `SMRITI_CONFIG_DIR` and
+  `SMRITI_DATA_DIR` to those host folders (absolute paths, folders must exist).
+  Sharing avoids re-downloading the packs and keeps one set of settings, but
+  don't run the host app and the container at the same time.
+- Build output and the cargo registry live in the `smriti-cache` volume, not
+  in `./target`. `docker compose down -v` deletes both volumes.
+- `CARGO_FEATURES=` (empty) builds without HEIC support.
+- `docker compose run` reuses an image that already exists. After changing the
+  code or the Dockerfile, rebuild with `docker compose build app` (or add
+  `--build` to the `run` command).
+
 ## Linux packaging (.deb + AppImage)
 
 The official path is `cargo tauri build` — it produces both

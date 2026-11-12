@@ -254,5 +254,9 @@ data/                  GeoNames database (gitignored)
 
 ## Optional integrations
 
-Face embedding can optionally be offloaded to a user-owned Kaggle/Colab notebook
-(see `docs/face-gpu-bridge.md`). The default flow uses local ONNX Runtime.
+ONNX models (face detection/embedding, visual search indexing) use a local GPU
+when one is usable and fall back to the CPU. Load every model through
+`ManagedSession` in `src/ml/runtime.rs` (never one GPU session per worker; honour
+`AppConfig::gpu_inference`). Face embedding can also be offloaded to a user-owned
+GPU bridge (Kaggle/Colab notebook or `notebooks/face_bridge.py`). See
+`docs/gpu-inference.md`. The default flow uses local ONNX Runtime.

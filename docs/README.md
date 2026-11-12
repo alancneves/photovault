@@ -35,15 +35,15 @@ photo library.
 
 ## For contributors
 
-- [Build from Source](BUILD.md) — toolchain setup per OS.
+- [Build from Source](BUILD.md) — toolchain setup per OS. Now with docker support.
 - [Architecture Overview](architecture/overview.md) — the three-crate
   split: engine, Tauri shell, frontend.
 - [Database](architecture/database.md) — schema and migration model.
 - [Services](architecture/services.md) — domain workflows.
 - [ML Pipeline](architecture/ml-pipeline.md) — face detection +
   embedding + clustering.
-- [Face GPU Bridge](face-gpu-bridge.md) — opt-in remote GPU
-  acceleration.
+- [GPU acceleration](gpu-inference.md) — local GPU with CPU
+  fallback for the on-device models, plus the opt-in remote GPU bridge.
 - [Testing](TESTING.md) — the test pyramid and what's enforced in CI.
 
 ## Privacy and data

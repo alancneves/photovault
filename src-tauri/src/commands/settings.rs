@@ -69,6 +69,7 @@ pub struct SettingsUpdateArgs {
     #[serde(deserialize_with = "nullable_patch")]
     pub face_gpu_bridge_url: Option<Option<String>>,
     pub face_gpu_bridge_enabled: Option<bool>,
+    pub gpu_inference: Option<bool>,
     pub assistant_enabled: Option<bool>,
     pub ai_features_enabled: Option<bool>,
     pub assistant_provider: Option<String>,
@@ -166,6 +167,9 @@ pub async fn settings_update(args: SettingsUpdateArgs) -> CommandResult<Settings
             }
         }
         cfg.face_gpu_bridge_url = v;
+    }
+    if let Some(v) = args.gpu_inference {
+        cfg.gpu_inference = v;
     }
     if let Some(v) = args.face_gpu_bridge_enabled {
         cfg.face_gpu_bridge_enabled = v;

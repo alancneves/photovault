@@ -97,6 +97,13 @@ pub struct AppConfig {
     #[serde(default = "default_thumbnail_cache_gb")]
     pub thumbnail_cache_gb: f64,
 
+    /// Run ML models (face detection and embedding, visual search indexing) on
+    /// the local GPU when one is usable, falling back to CPU automatically.
+    /// Turn off to force CPU (e.g. a weak integrated GPU that is slower than
+    /// the CPU path). Named `face_gpu_inference` in unreleased builds.
+    #[serde(default = "default_gpu_inference", alias = "face_gpu_inference")]
+    pub gpu_inference: bool,
+
     /// Optional GPU bridge URL for face embedding (opt-in).
     #[serde(default)]
     pub face_gpu_bridge_url: Option<String>,
@@ -181,6 +188,10 @@ fn default_map_cache_limit_mb() -> u32 {
     500
 }
 
+fn default_gpu_inference() -> bool {
+    true
+}
+
 fn default_thumbnail_cache_gb() -> f64 {
     5.0
 }
@@ -253,6 +264,7 @@ impl Default for AppConfig {
             assistant_api_key: None,
             face_gpu_bridge_url: None,
             face_gpu_bridge_enabled: false,
+            gpu_inference: default_gpu_inference(),
         }
     }
 }
@@ -493,6 +505,23 @@ pub enum DateFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_inference_defaults_on_for_existing_configs() {
+        // A config written before the field existed must still load, with GPU on.
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        json.as_object_mut().unwrap().remove("gpu_inference");
+        let cfg: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(cfg.gpu_inference);
+
+        // The pre-release name is still read.
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("gpu_inference");
+        obj.insert("face_gpu_inference".into(), false.into());
+        let cfg: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(!cfg.gpu_inference);
+    }
 
     #[test]
     fn credentials_are_never_serialized_or_debugged_but_legacy_keys_can_be_read() {

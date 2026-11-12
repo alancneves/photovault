@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use ort::execution_providers::ExecutionProvider;
+use ort::execution_providers::{ExecutionProvider, ExecutionProviderDispatch};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
@@ -33,6 +33,164 @@ const ORT_LIB_NAME: &str = "onnxruntime.dll";
 const ORT_LIB_NAME: &str = "libonnxruntime.dylib";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const ORT_LIB_NAME: &str = "libonnxruntime.so";
+
+/// One accelerated session for a model, shared by every face worker in a run.
+///
+/// Building a GPU session per worker caused cold-start and VRAM blowups, and
+/// DirectML does not allow concurrent `Run` calls on one session anyway, so
+/// workers serialize only the inference call here and keep decoding,
+/// pre-processing and post-processing in parallel.
+///
+/// The first inference error disables it for the rest of the run. Workers then
+/// see an error from [`SharedGpuSession::run`] and move to their own CPU
+/// session through their existing one-shot CPU fallback.
+pub struct SharedGpuSession {
+    session: Mutex<Session>,
+    label: &'static str,
+    disabled: AtomicBool,
+}
+
+impl std::fmt::Debug for SharedGpuSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedGpuSession")
+            .field("provider", &self.label)
+            .field("disabled", &self.disabled.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl SharedGpuSession {
+    /// `None` when no accelerated provider can host this model.
+    pub fn try_new(path: &Path) -> Option<std::sync::Arc<Self>> {
+        let (session, label) = OnnxRuntime::load_gpu_model(path)?;
+        Some(std::sync::Arc::new(Self {
+            session: Mutex::new(session),
+            label,
+            disabled: AtomicBool::new(false),
+        }))
+    }
+
+    pub fn provider(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Relaxed)
+    }
+
+    /// Run `f` with exclusive access to the session. Any error (or a panic
+    /// that poisoned the lock) disables the session for everyone.
+    pub fn run<R>(&self, f: impl FnOnce(&mut Session) -> ort::Result<R>) -> ort::Result<R> {
+        if self.is_disabled() {
+            return Err(ort::Error::new(
+                "GPU inference disabled after an earlier failure",
+            ));
+        }
+        let mut guard = match self.session.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                self.disable("session lock poisoned by a panic");
+                return Err(ort::Error::new("GPU session poisoned"));
+            }
+        };
+        let result = f(&mut guard);
+        if let Err(error) = &result {
+            self.disable(&error.to_string());
+        }
+        result
+    }
+
+    fn disable(&self, reason: &str) {
+        if !self.disabled.swap(true, Ordering::Relaxed) {
+            tracing::warn!(provider = self.label, %reason,
+                "GPU inference failed; workers will continue on CPU");
+        }
+    }
+}
+
+/// A model session that prefers the GPU and degrades to the CPU on its own.
+///
+/// This is the one place the GPU-then-CPU policy lives, so every ONNX model
+/// (face detection, face embedding, visual search, ...) behaves the same way:
+///
+/// * built on a [`SharedGpuSession`] when one is available, else on its own CPU
+///   session;
+/// * if a GPU-backed run fails, it loads its own CPU session once and retries;
+/// * a CPU-backed run that fails just returns the error.
+pub struct ManagedSession {
+    gpu: Option<std::sync::Arc<SharedGpuSession>>,
+    cpu: Option<Session>,
+    path: PathBuf,
+    cpu_threads: usize,
+    cpu_fallback_attempted: bool,
+}
+
+impl ManagedSession {
+    /// A private CPU session.
+    pub fn cpu(path: &Path, cpu_threads: usize) -> ort::Result<Self> {
+        Ok(Self {
+            gpu: None,
+            cpu: Some(OnnxRuntime::load_cpu_model_with_threads(path, cpu_threads)?),
+            path: path.to_path_buf(),
+            cpu_threads,
+            cpu_fallback_attempted: false,
+        })
+    }
+
+    /// A handle on a session shared with other workers. No per-handle session is
+    /// built; `cpu_threads` is only used if this handle has to fall back to CPU.
+    pub fn shared(gpu: std::sync::Arc<SharedGpuSession>, path: &Path, cpu_threads: usize) -> Self {
+        Self {
+            gpu: Some(gpu),
+            cpu: None,
+            path: path.to_path_buf(),
+            cpu_threads,
+            cpu_fallback_attempted: false,
+        }
+    }
+
+    /// For a model with a single owner: the GPU when `use_gpu` is set and a
+    /// provider starts, else a private CPU session.
+    pub fn auto(path: &Path, use_gpu: bool, cpu_threads: usize) -> ort::Result<Self> {
+        if use_gpu {
+            if let Some(gpu) = SharedGpuSession::try_new(path) {
+                return Ok(Self::shared(gpu, path, cpu_threads));
+            }
+        }
+        Self::cpu(path, cpu_threads)
+    }
+
+    /// Run `f` against the session, moving to the CPU once if a GPU run fails.
+    /// `f` may be called twice, so it must not consume its inputs.
+    pub fn run<R>(&mut self, mut f: impl FnMut(&mut Session) -> ort::Result<R>) -> ort::Result<R> {
+        match self.run_once(&mut f) {
+            Err(error) if self.gpu.is_some() && !self.cpu_fallback_attempted => {
+                tracing::warn!(model = %self.path.display(), %error,
+                    "Inference failed on the GPU; retrying once on CPU");
+                self.cpu_fallback_attempted = true;
+                // Drop our handle on the shared session; it is already disabled.
+                self.gpu = None;
+                self.cpu = None; // Release memory before building the fallback.
+                self.cpu = Some(OnnxRuntime::load_cpu_model(&self.path, self.cpu_threads)?);
+                self.run_once(&mut f)
+            }
+            other => other,
+        }
+    }
+
+    fn run_once<R>(
+        &mut self,
+        f: &mut impl FnMut(&mut Session) -> ort::Result<R>,
+    ) -> ort::Result<R> {
+        if let Some(gpu) = self.gpu.clone() {
+            return gpu.run(|session| f(session));
+        }
+        match self.cpu.as_mut() {
+            Some(session) => f(session),
+            None => Err(ort::Error::new("model session unavailable")),
+        }
+    }
+}
 
 /// ONNX Runtime environment wrapper
 ///
@@ -223,28 +381,10 @@ impl OnnxRuntime {
         Ok(Self)
     }
 
-    /// Load an ONNX model with a specific number of intra-op threads.
-    ///
-    /// Attempts to register GPU execution providers in platform-specific
-    /// priority order, then falls back to CPU if none initialize. The CPU
-    /// provider is always appended last so session creation never fails due
-    /// to missing GPU drivers or runtime libraries.
-    ///
-    /// Platform priority:
-    ///   Windows: DirectML  (covers NVIDIA/AMD/Intel/Qualcomm via D3D12)
-    ///   Linux:   CUDA      (NVIDIA). ROCm could be added via a cargo flag later.
-    ///   macOS:   CoreML    (Apple Silicon + AMD on Intel Macs)
-    ///
-    /// `intra_threads` applies to the CPU provider; GPU providers ignore it.
-    pub fn load_model_with_threads<P: AsRef<Path>>(
-        &self,
-        path: P,
-        intra_threads: usize,
-    ) -> ort::Result<Session> {
-        // Registration failure must be observable: try complete sessions one at
-        // a time, then retry CPU if a GPU cannot initialize this particular model.
-        let path = path.as_ref();
-        let providers = vec![
+    /// Accelerated execution providers for this platform, in priority order.
+    /// Never includes CPU.
+    fn gpu_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
+        vec![
             #[cfg(target_os = "windows")]
             (
                 "DirectML registered (placement unverified)",
@@ -267,68 +407,82 @@ impl OnnxRuntime {
                 "CoreML registered (placement unverified)",
                 ort::execution_providers::CoreMLExecutionProvider::default().build(),
             ),
-            (
-                "CPU",
-                ort::execution_providers::CPUExecutionProvider::default().build(),
-            ),
-        ];
+        ]
+    }
 
+    /// Build one session with exactly one provider. Registration failure is
+    /// an error (`error_on_failure`), never a silent CPU placement.
+    fn build_session(
+        path: &Path,
+        label: &str,
+        provider: ExecutionProviderDispatch,
+        intra_threads: usize,
+    ) -> ort::Result<Session> {
+        let builder = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(intra_threads)?
+            .with_parallel_execution(false)?
+            .with_config_entry("session.intra_op.allow_spinning", "0")?
+            .with_config_entry("session.inter_op.allow_spinning", "0")?;
+        let builder = if label.starts_with("DirectML") {
+            builder.with_memory_pattern(false)?
+        } else {
+            builder
+        };
+        builder
+            .with_execution_providers([provider.error_on_failure()])?
+            .commit_from_file(path)
+    }
+
+    /// Record which provider a session ended up on, for the status label.
+    fn record_provider(label: &'static str) {
+        let mut active = ACTIVE_PROVIDER.lock().unwrap_or_else(|e| e.into_inner());
+        *active = if *active == "Not initialized" || *active == label {
+            label
+        } else {
+            "Mixed model providers (see logs; placement unverified)"
+        };
+    }
+
+    /// Try to build a session on an accelerated provider ONLY. Returns `None`
+    /// when this platform has no accelerator or every one fails to initialize
+    /// (missing driver, CPU-only ONNX Runtime build, unsupported ops, ...).
+    /// There is deliberately no CPU tail here: the caller must know it did not
+    /// get a GPU so it can pick its own CPU strategy.
+    pub fn load_gpu_model(path: &Path) -> Option<(Session, &'static str)> {
         if !EP_LOGGED.swap(true, Ordering::Relaxed) {
             Self::probe_and_log_providers();
         }
-        let mut last_error = None;
-        for (label, provider) in providers {
-            let attempt = (|| {
-                let builder = Session::builder()?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)?
-                    .with_intra_threads(intra_threads.clamp(1, 2))?
-                    .with_parallel_execution(false)?
-                    .with_config_entry("session.intra_op.allow_spinning", "0")?
-                    .with_config_entry("session.inter_op.allow_spinning", "0")?;
-                let builder = if label.starts_with("DirectML") {
-                    builder.with_memory_pattern(false)?
-                } else {
-                    builder
-                };
-                builder
-                    .with_execution_providers([provider.error_on_failure()])?
-                    .commit_from_file(path)
-            })();
-            match attempt {
+        for (label, provider) in Self::gpu_providers() {
+            match Self::build_session(path, label, provider, 2) {
                 Ok(session) => {
-                    let mut active = ACTIVE_PROVIDER.lock().unwrap_or_else(|e| e.into_inner());
-                    *active = if *active == "Not initialized" || *active == label {
-                        label
-                    } else {
-                        "Mixed model providers (see logs; placement unverified)"
-                    };
-                    tracing::info!(model = %path.display(), provider = label, "Inference session initialized");
-                    return Ok(session);
+                    Self::record_provider(label);
+                    tracing::info!(model = %path.display(), provider = label, "GPU inference session initialized");
+                    return Some((session, label));
                 }
                 Err(error) => {
                     tracing::warn!(model = %path.display(), provider = label, %error,
-                        "Provider initialization failed; trying fallback");
-                    last_error = Some(error);
+                        "GPU provider initialization failed; trying next");
                 }
             }
         }
-        Err(last_error.expect("CPU provider is always attempted"))
+        None
     }
 
     /// A one-way CPU fallback after an inference-time provider/device failure.
-    pub fn load_cpu_model(path: &Path) -> ort::Result<Session> {
-        let session = Self::load_cpu_model_with_threads(path, 1)?;
+    pub fn load_cpu_model(path: &Path, intra_threads: usize) -> ort::Result<Session> {
+        let session = Self::load_cpu_model_with_threads(path, intra_threads)?;
         *ACTIVE_PROVIDER.lock().unwrap_or_else(|e| e.into_inner()) =
             "CPU fallback used (see per-model logs)";
         tracing::warn!(model = %path.display(), "Inference moved to CPU after device/provider failure");
         Ok(session)
     }
 
-    /// Build a CPU-only session with an explicit share of the aggregate face
-    /// processing budget. Face workers use this path because constructing one
-    /// DirectML session per worker caused severe cold-start and throughput
-    /// regressions on integrated GPUs. Other ML features may still use the
-    /// provider-selecting path above.
+    /// Build a CPU-only session with an explicit thread budget. This is the CPU
+    /// path for every model: used when the GPU is off or unavailable, and as the
+    /// fallback after a GPU failure. Callers must never build one *GPU* session
+    /// per worker (severe cold-start and VRAM regressions); they share a
+    /// [`SharedGpuSession`].
     pub fn load_cpu_model_with_threads(path: &Path, intra_threads: usize) -> ort::Result<Session> {
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -372,15 +526,9 @@ impl OnnxRuntime {
     /// One-shot probe: log which execution providers are usable on this
     /// machine, and say plainly which of them this build will actually use.
     ///
-    /// Two things this deliberately does NOT claim:
-    ///
-    /// 1. That face detection/embedding will use a GPU. It will not —
-    ///    `FaceDetector`/`FaceEmbedder` both call
-    ///    `load_cpu_model_with_threads`, because building one DirectML session
-    ///    per worker caused severe cold-start and throughput regressions on
-    ///    integrated GPUs. Only the provider-selecting path (semantic search)
-    ///    still probes for a GPU, so the log says so instead of implying faces
-    ///    are GPU-bound.
+    /// This only reports which providers are present. It does NOT claim a
+    /// model actually runs on one: sessions log their own registered provider,
+    /// and node placement is unverified (unsupported ops can stay on CPU).
     fn probe_and_log_providers() {
         let mut accelerated: Vec<&'static str> = Vec::new();
 
@@ -415,9 +563,8 @@ impl OnnxRuntime {
 
         tracing::info!(
             accelerated = %if accelerated.is_empty() { "none".to_string() } else { accelerated.join(", ") },
-            "Execution providers present. Face detection/embedding always run on CPU; \
-             the provider-selecting path (semantic search) tries accelerated providers first, \
-             then CPU."
+            "Execution providers present. Face detection/embedding and semantic search try \
+             an accelerated provider first and fall back to CPU."
         );
     }
 }

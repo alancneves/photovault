@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- On-device AI models (face detection and embedding, visual search indexing) now
+  use the GPU when one is usable and fall back to the CPU automatically if none
+  is found or it fails. Face models share one GPU session each rather than one
+  per worker. A "Use the GPU" switch in Settings → AI features turns it off. The
+  search text encoder stays on the CPU, where it is faster for a single query.
+
 ## [0.5.0] — 2026-10-19
 
 ### Added

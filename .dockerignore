@@ -1,0 +1,32 @@
+# Build output and caches (the image builds its own)
+target
+target-win
+artifacts
+.cache
+src-tauri/gen
+src-tauri/target
+src-ui/node_modules
+src-ui/dist
+src-ui/.svelte-kit
+src-ui/.test-out
+
+# Downloaded assets are mounted at run time, never baked in
+models
+libs
+data/*
+!data/README.md
+
+# Not needed to build
+.git
+.github
+.claude
+.zcode
+.idea
+.vscode
+website
+notebooks
+docs
+*.md
+!README.md
+Dockerfile
+docker-compose.yml

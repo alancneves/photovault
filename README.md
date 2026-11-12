@@ -207,7 +207,8 @@ error when asked to decode one.
 ```
 
 See [`docs/BUILD.md`](docs/BUILD.md) for full setup details including the
-WSL + Windows development workflow.
+WSL + Windows development workflow, and for building and running in Docker
+(`docker compose run --rm app`, with a GPU or a lighter CPU-only image).
 
 #### Packaging helpers
 

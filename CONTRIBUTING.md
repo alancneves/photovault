@@ -5,6 +5,8 @@
 Use [Build from Source](docs/BUILD.md) for platform dependencies and
 [agents.md](agents.md) for the development workflow. Start the app with
 `scripts/dev.sh` or `scripts/dev.ps1`, not the unwrapped Tauri watcher.
+On Linux you can instead build, test and run in containers; see the
+[Docker section](docs/BUILD.md#docker).
 
 ## Changes and tests
 

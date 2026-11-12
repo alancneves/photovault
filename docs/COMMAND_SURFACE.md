@@ -812,6 +812,7 @@ struct SettingsDto {
     map_cache_limit_mb: u32,
     assistant_enabled: bool,
     ai_features_enabled: bool,
+    gpu_inference: bool,               // default true; GPU for on-device models (faces, visual search), CPU fallback
     assistant_provider: String,        // default "openai_compatible"
     assistant_base_url: String,        // default "https://openrouter.ai/api/v1"
     assistant_model: String,           // default "deepseek/deepseek-v4-flash"

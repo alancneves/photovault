@@ -15,6 +15,7 @@ use crate::db::Database;
 use crate::db::InferredIdentityRepo;
 use crate::ml::{
     ClusterInput, FaceClusterer, FaceDetector, FaceEmbedder, FaceEmbedding, OnnxRuntime,
+    SharedGpuSession,
 };
 use crate::services::image_utils::apply_exif_orientation;
 use crate::services::path_util::safe_join_relative;
@@ -251,6 +252,28 @@ impl FaceProcessor {
             );
         }
 
+        // One accelerated session per model, shared by every worker (never one
+        // per worker: that blows up cold-start time and VRAM). `None` means no
+        // usable GPU, or GPU inference is turned off; workers then build their
+        // own CPU sessions exactly as before. A remote bridge takes the
+        // embedding step, so don't hold VRAM for an embedder it will replace.
+        let (gpu_detector, gpu_embedder) = if cfg.gpu_inference {
+            let det = SharedGpuSession::try_new(&detector_path);
+            let emb = if gpu_bridge_url.is_none() && embedder_path.exists() {
+                SharedGpuSession::try_new(&embedder_path)
+            } else {
+                None
+            };
+            (det, emb)
+        } else {
+            (None, None)
+        };
+        tracing::info!(
+            detector = gpu_detector.as_ref().map_or("CPU", |g| g.provider()),
+            embedder = gpu_embedder.as_ref().map_or("CPU", |g| g.provider()),
+            "Face inference device"
+        );
+
         // Create faces directory
         let faces_dir = drive_path.join(".photovault").join("faces");
         if let Err(e) = std::fs::create_dir_all(&faces_dir) {
@@ -373,7 +396,11 @@ impl FaceProcessor {
                     let emb_path = embedder_path.clone();
                     DETECTOR.with(|d| {
                         if d.borrow().is_none() {
-                            match FaceDetector::new_with_threads(&runtime, det_path.as_ref(), intra_threads) {
+                            let built = match &gpu_detector {
+                                Some(gpu) => Ok(FaceDetector::new_shared(gpu.clone(), det_path.as_ref(), intra_threads)),
+                                None => FaceDetector::new_with_threads(&runtime, det_path.as_ref(), intra_threads),
+                            };
+                            match built {
                                 Ok(det) => {
                                     *d.borrow_mut() = Some(det.with_confidence_threshold(detector_confidence));
                                 }
@@ -390,6 +417,7 @@ impl FaceProcessor {
                                 gpu_bridge_url: gpu_bridge_url.clone(),
                                 expected_model: embedder_model_name.clone(),
                                 intra_threads,
+                                shared_gpu: gpu_embedder.clone(),
                             };
                             match FaceEmbedder::from_config(&runtime, &embedder_cfg) {
                                 Ok(emb) => {

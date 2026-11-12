@@ -14,6 +14,7 @@
 //! Landmarks are (dx, dy) offsets from anchor center for 5 keypoints.
 
 use std::path::Path;
+use std::sync::Arc;
 
 #[allow(unused_imports)]
 use image::GenericImageView; // needed by `DynamicImage::dimensions()` in some configurations
@@ -21,7 +22,8 @@ use image::{DynamicImage, RgbImage};
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use super::OnnxRuntime;
+use super::runtime::ManagedSession;
+use super::{OnnxRuntime, SharedGpuSession};
 
 /// A detected face with bounding box and landmarks
 #[derive(Debug, Clone)]
@@ -45,9 +47,7 @@ pub struct DetectedFace {
 
 /// SCRFD Face Detector
 pub struct FaceDetector {
-    session: Option<Session>,
-    model_path: std::path::PathBuf,
-    cpu_fallback_attempted: bool,
+    session: ManagedSession,
     input_size: (u32, u32),
     confidence_threshold: f32,
     nms_threshold: f32,
@@ -69,18 +69,31 @@ impl FaceDetector {
         model_path: P,
         intra_threads: usize,
     ) -> ort::Result<Self> {
-        let model_path = model_path.as_ref().to_path_buf();
         let _ = runtime;
-        let session = OnnxRuntime::load_cpu_model_with_threads(&model_path, intra_threads)?;
+        let session = ManagedSession::cpu(model_path.as_ref(), intra_threads)?;
 
         Ok(Self {
-            session: Some(session),
-            model_path,
-            cpu_fallback_attempted: false,
+            session,
             input_size: (640, 640),
             confidence_threshold: 0.5,
             nms_threshold: 0.4,
         })
+    }
+
+    /// Use a session shared across workers (see [`SharedGpuSession`]). No
+    /// per-worker session is built; if the GPU fails, the first failing call
+    /// loads a CPU session for this detector (`intra_threads`) and retries.
+    pub fn new_shared<P: AsRef<Path>>(
+        gpu: Arc<SharedGpuSession>,
+        model_path: P,
+        intra_threads: usize,
+    ) -> Self {
+        Self {
+            session: ManagedSession::shared(gpu, model_path.as_ref(), intra_threads),
+            input_size: (640, 640),
+            confidence_threshold: 0.5,
+            nms_threshold: 0.4,
+        }
     }
 
     /// Set confidence threshold for detection
@@ -219,33 +232,23 @@ impl FaceDetector {
 
     /// Run ONNX inference and extract output tensors with their shapes
     fn run_inference(&mut self, input_data: &[f32]) -> ort::Result<Vec<(Vec<i64>, Vec<f32>)>> {
-        match self.run_inference_once(input_data) {
-            Ok(output) => Ok(output),
-            Err(error) if !self.cpu_fallback_attempted => {
-                tracing::warn!(%error, "Detector inference failed; retrying once on CPU");
-                self.cpu_fallback_attempted = true;
-                self.session = None; // Release device memory before constructing the fallback.
-                self.session = Some(OnnxRuntime::load_cpu_model(&self.model_path)?);
-                self.run_inference_once(input_data)
-            }
-            Err(error) => Err(error),
-        }
+        let input_size = self.input_size;
+        self.session
+            .run(|session| Self::infer(session, input_size, input_data))
     }
 
-    fn run_inference_once(&mut self, input_data: &[f32]) -> ort::Result<Vec<(Vec<i64>, Vec<f32>)>> {
-        let (target_w, target_h) = self.input_size;
-
+    fn infer(
+        session: &mut Session,
+        (target_w, target_h): (u32, u32),
+        input_data: &[f32],
+    ) -> ort::Result<Vec<(Vec<i64>, Vec<f32>)>> {
         // Create input tensor (shape [1, 3, 640, 640])
         let input_tensor = TensorRef::<f32>::from_array_view((
             vec![1i64, 3, target_h as i64, target_w as i64],
             input_data,
         ))?;
 
-        let outputs = self
-            .session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("Detector session unavailable"))?
-            .run(ort::inputs![input_tensor])?;
+        let outputs = session.run(ort::inputs![input_tensor])?;
 
         // Extract all output tensors with shapes
         let mut results = Vec::new();

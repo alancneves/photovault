@@ -30,4 +30,4 @@
 - [Database](architecture/database.md)
 - [Services](architecture/services.md)
 - [ML Pipeline](architecture/ml-pipeline.md)
-- [Face GPU Bridge](face-gpu-bridge.md)
+- [GPU acceleration](gpu-inference.md)

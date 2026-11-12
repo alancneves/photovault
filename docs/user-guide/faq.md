@@ -57,7 +57,9 @@ HTTP request. See [PRIVACY.md](../../PRIVACY.md).
 
 ## Why does my face-recognition pass take a long time?
 
-Face detection runs ONNX models on the CPU by default. A 10K-photo
+Face detection runs ONNX models on your machine. It uses a usable GPU
+automatically and falls back to the CPU otherwise (see
+[GPU acceleration](../gpu-inference.md)). On the CPU, a 10K-photo
 library typically takes 5-20 minutes on a modern laptop. Progress
 is shown in the People view. The pass is resumable — close and
 re-open the app, it picks up where it left off.

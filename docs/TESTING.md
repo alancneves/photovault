@@ -132,6 +132,9 @@ Did you fix a bug?
 # Everything CI runs:
 scripts/ci_local.sh ci
 
+# The same, in a container (no local Rust/Node needed; see BUILD.md#docker):
+docker compose run --rm ci
+
 # Just the Rust suite (engine + tauri):
 cargo test -p smriti -p smriti-tauri
 
